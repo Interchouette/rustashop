@@ -163,11 +163,138 @@ mod tests {
         let query = ListOrdersQuery::from_query_string(Some("limit=3&offset=1"));
         assert_eq!(query.limit, Some(3));
         assert_eq!(query.offset, Some(1));
+        assert_eq!(ListOrdersQuery::from_query_string(None).limit, None);
+        let noisy = ListOrdersQuery::from_query_string(Some("&=1&foo=x&limit=nope"));
+        assert_eq!(noisy.limit, None);
     }
 
     #[test]
     fn openapi_stubs_are_callable() {
         list_admin_orders();
         patch_admin_order();
+    }
+}
+
+#[cfg(all(test, feature = "persist-sqlx"))]
+mod admin_orders_response_tests {
+    use super::*;
+    use rustashop_persist_sqlx::{migrate, seed_catalog, SqlxCatalogRepository};
+    use sqlx::postgres::PgPoolOptions;
+
+    const SCHEMA_LOCK: i64 = 874_521;
+
+    async fn seeded_catalog() -> (SqlxCatalogRepository, sqlx::PgPool) {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect");
+        sqlx::query("SELECT pg_advisory_lock($1)")
+            .bind(SCHEMA_LOCK)
+            .execute(&pool)
+            .await
+            .expect("lock");
+        sqlx::query("DROP SCHEMA public CASCADE")
+            .execute(&pool)
+            .await
+            .expect("drop");
+        sqlx::query("CREATE SCHEMA public")
+            .execute(&pool)
+            .await
+            .expect("create");
+        migrate(&pool).await.expect("migrate");
+        seed_catalog(&pool).await.expect("seed");
+        (SqlxCatalogRepository::new(pool.clone()), pool)
+    }
+
+    #[tokio::test]
+    async fn covers_auth_and_validation_errors() {
+        let auth = AdminAuthConfig::from_token("secret");
+        let (catalog, _pool) = seeded_catalog().await;
+        assert_eq!(
+            list_admin_orders_response(&auth, None, &catalog, &ListOrdersQuery::default())
+                .await
+                .status(),
+            401
+        );
+        assert_eq!(
+            patch_admin_order_response(&auth, None, &catalog, "id", br#"{"status":"paid"}"#)
+                .await
+                .status(),
+            401
+        );
+        assert_eq!(
+            patch_admin_order_response(
+                &auth,
+                Some("secret"),
+                &catalog,
+                "a\0b",
+                br#"{"status":"paid"}"#,
+            )
+            .await
+            .status(),
+            422
+        );
+        assert_eq!(
+            patch_admin_order_response(&auth, Some("secret"), &catalog, "oid", b"{")
+                .await
+                .status(),
+            422
+        );
+        assert_eq!(
+            patch_admin_order_response(
+                &auth,
+                Some("secret"),
+                &catalog,
+                "11111111-1111-1111-1111-111111111111",
+                br#"{"status":"nope"}"#,
+            )
+            .await
+            .status(),
+            422
+        );
+        assert_eq!(
+            patch_admin_order_response(
+                &auth,
+                Some("secret"),
+                &catalog,
+                "11111111-1111-1111-1111-111111111111",
+                br#"{"status":"paid"}"#,
+            )
+            .await
+            .status(),
+            404
+        );
+    }
+
+    #[tokio::test]
+    async fn covers_persist_errors_on_closed_pool() {
+        let auth = AdminAuthConfig::from_token("secret");
+        let (catalog, pool) = seeded_catalog().await;
+        pool.close().await;
+        assert_eq!(
+            list_admin_orders_response(
+                &auth,
+                Some("secret"),
+                &catalog,
+                &ListOrdersQuery::default()
+            )
+            .await
+            .status(),
+            500
+        );
+        assert_eq!(
+            patch_admin_order_response(
+                &auth,
+                Some("secret"),
+                &catalog,
+                "11111111-1111-1111-1111-111111111111",
+                br#"{"status":"paid"}"#,
+            )
+            .await
+            .status(),
+            500
+        );
     }
 }

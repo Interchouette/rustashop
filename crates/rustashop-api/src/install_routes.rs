@@ -164,9 +164,41 @@ mod tests {
     }
 
     #[test]
-    fn complete_returns_not_found_without_dist() {
+    fn complete_returns_not_found_without_root_or_dist() {
         let dir = tempfile_dir("complete-absent");
-        let resp = install_complete_response(Some(&dir), br#"{"wipe_confirmed":true}"#);
+        assert_eq!(
+            install_complete_response(Some(&dir), br#"{"wipe_confirmed":true}"#).status(),
+            404
+        );
+        assert_eq!(
+            install_complete_response(None, br#"{"wipe_confirmed":true}"#).status(),
+            404
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn complete_rejects_invalid_json_body() {
+        let dir = tempfile_dir("complete-bad-json");
+        let index = install_dist_index(&dir);
+        fs::create_dir_all(index.parent().expect("parent")).expect("mkdir");
+        fs::write(&index, "<!doctype html>").expect("write");
+        let resp = install_complete_response(Some(&dir), b"not-json");
+        assert_eq!(resp.status(), 400);
+        let body: serde_json::Value = serde_json::from_slice(resp.body()).expect("json");
+        assert_eq!(body["error"], "invalid_body");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[actix_web::test]
+    async fn configure_install_skips_without_dist() {
+        use actix_web::{test, App};
+
+        let dir = tempfile_dir("cfg-skip");
+        let app =
+            test::init_service(App::new().configure(|cfg| configure_install(cfg, &dir))).await;
+        let req = test::TestRequest::get().uri("/install/").to_request();
+        let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), 404);
         let _ = fs::remove_dir_all(&dir);
     }

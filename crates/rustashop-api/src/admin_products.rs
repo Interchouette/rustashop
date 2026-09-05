@@ -99,10 +99,81 @@ mod tests {
         assert_eq!(query.limit, Some(5));
         assert_eq!(query.offset, Some(2));
         assert_eq!(ListAdminProductsQuery::from_query_string(None).limit, None);
+        let noisy = ListAdminProductsQuery::from_query_string(Some("&=1&foo=bar&limit=nope"));
+        assert_eq!(noisy.limit, None);
+        assert_eq!(noisy.offset, None);
     }
 
     #[test]
     fn openapi_stub_is_callable() {
         list_admin_products();
+    }
+}
+
+#[cfg(all(test, feature = "persist-sqlx"))]
+mod admin_products_response_tests {
+    use super::*;
+    use rustashop_persist_sqlx::{migrate, seed_catalog, SqlxCatalogRepository};
+    use sqlx::postgres::PgPoolOptions;
+
+    // Shared with other rustashop-api lib tests that reset `public`.
+    const SCHEMA_LOCK: i64 = 874_521;
+
+    #[tokio::test]
+    async fn covers_auth_and_persist_errors() {
+        let auth = AdminAuthConfig::from_token("secret");
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect");
+        sqlx::query("SELECT pg_advisory_lock($1)")
+            .bind(SCHEMA_LOCK)
+            .execute(&pool)
+            .await
+            .expect("lock");
+        sqlx::query("DROP SCHEMA public CASCADE")
+            .execute(&pool)
+            .await
+            .expect("drop");
+        sqlx::query("CREATE SCHEMA public")
+            .execute(&pool)
+            .await
+            .expect("create");
+        migrate(&pool).await.expect("migrate");
+        seed_catalog(&pool).await.expect("seed");
+        let catalog = SqlxCatalogRepository::new(pool.clone());
+
+        assert_eq!(
+            list_admin_products_response(&auth, None, &catalog, &ListAdminProductsQuery::default())
+                .await
+                .status(),
+            401
+        );
+        assert_eq!(
+            list_admin_products_response(
+                &auth,
+                Some("secret"),
+                &catalog,
+                &ListAdminProductsQuery::default(),
+            )
+            .await
+            .status(),
+            200
+        );
+
+        pool.close().await;
+        assert_eq!(
+            list_admin_products_response(
+                &auth,
+                Some("secret"),
+                &catalog,
+                &ListAdminProductsQuery::default(),
+            )
+            .await
+            .status(),
+            500
+        );
     }
 }

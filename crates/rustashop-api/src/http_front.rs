@@ -678,6 +678,78 @@ mod tests {
     }
 
     #[actix_web::test]
+    async fn admin_and_install_helpers_cover_edge_arms() {
+        let auth = AdminAuthConfig::from_token("tok");
+        assert_eq!(
+            list_admin_products_via_catalog(&auth, None, None, None)
+                .await
+                .status(),
+            401
+        );
+        assert_eq!(
+            list_admin_products_via_catalog(&auth, Some("tok"), None, None)
+                .await
+                .status(),
+            500
+        );
+        assert_eq!(
+            list_admin_orders_via_catalog(&auth, Some("tok"), None, Some("limit=1"))
+                .await
+                .status(),
+            500
+        );
+        assert_eq!(
+            patch_admin_order_via_catalog(&auth, Some("tok"), None, Some("id"), b"{}")
+                .await
+                .status(),
+            500
+        );
+        assert_eq!(
+            patch_admin_order_via_catalog(&auth, None, None, None, b"{}")
+                .await
+                .status(),
+            401
+        );
+
+        let complete = actix_test::TestRequest::post()
+            .uri("/install/api/complete")
+            .set_json(serde_json::json!({ "wipe_confirmed": true }))
+            .to_request();
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(test_kernel())
+                .configure(|cfg| configure_serenade_front(cfg, DEFAULT_ADMIN_API_PREFIX)),
+        )
+        .await;
+        assert_eq!(actix_test::call_service(&app, complete).await.status(), 404);
+    }
+
+    #[cfg(feature = "persist-sqlx")]
+    #[actix_web::test]
+    async fn patch_admin_requires_id_when_catalog_present() {
+        use rustashop_persist_sqlx::SqlxCatalogRepository;
+        use sqlx::postgres::PgPoolOptions;
+
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skip: DATABASE_URL is not set");
+            return;
+        };
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect");
+        let catalog = SqlxCatalogRepository::new(pool);
+        let auth = AdminAuthConfig::from_token("tok");
+        assert_eq!(
+            patch_admin_order_via_catalog(&auth, Some("tok"), Some(&catalog), None, b"{}")
+                .await
+                .status(),
+            404
+        );
+    }
+
+    #[actix_web::test]
     async fn orphan_route_maps_to_not_found() {
         let app = actix_test::init_service(
             App::new()
